@@ -1,0 +1,8 @@
+streamlit
+supabase
+sentence-transformers
+anthropic
+python-dotenv
+pymupdf
+langchain-text-splitters
+numpy
