@@ -1,0 +1,5 @@
+﻿NL markt/
+BE markt/
+*.pdf
+__pycache__/
+.env
