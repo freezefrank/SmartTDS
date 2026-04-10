@@ -45,11 +45,13 @@ create index if not exists documenten_merk_idx  on documenten (merk);
 
 -- 5. Zoekfunctie met optionele metadata filters
 create or replace function zoek_documenten(
-    query_embedding vector(384),
-    aantal          int     default 6,
-    filter_markt    text    default null,
-    filter_segment  text    default null,
-    filter_merk     text    default null
+    query_embedding   vector(384),
+    aantal            int     default 12,
+    filter_markt      text    default null,
+    filter_segment    text    default null,
+    filter_merk       text    default null,
+    filter_producttype text   default null,
+    filter_ondergrond text    default null
 )
 returns table (
     id           bigint,
@@ -86,9 +88,11 @@ begin
         1 - (d.embedding <=> query_embedding) as similarity
     from documenten d
     where
-        (filter_markt   is null or d.markt   = filter_markt)
-        and (filter_segment is null or d.segment = filter_segment)
-        and (filter_merk    is null or d.merk    = filter_merk)
+        (filter_markt       is null or d.markt       = filter_markt)
+        and (filter_segment     is null or d.segment     = filter_segment)
+        and (filter_merk        is null or d.merk        = filter_merk)
+        and (filter_producttype is null or d.producttype ilike '%' || filter_producttype || '%')
+        and (filter_ondergrond  is null or d.ondergrond  ilike '%' || filter_ondergrond  || '%')
     order by d.embedding <=> query_embedding
     limit aantal;
 end;

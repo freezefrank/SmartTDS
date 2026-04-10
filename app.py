@@ -55,8 +55,31 @@ with st.sidebar:
     ]
     merk_filter = st.selectbox("Merk", options=merk_opties, index=0)
 
+    producttype_opties = [
+        "Alle types",
+        "primer", "grondverf", "eindlaag", "lak", "beits",
+        "vulmiddel", "coating", "reiniger", "verdunner"
+    ]
+    producttype_filter = st.selectbox(
+        "Producttype",
+        options=producttype_opties,
+        index=0,
+        help="Filter op type product — voorkomt dat eindlagen hoger scoren dan primers"
+    )
+
+    ondergrond_opties = [
+        "Alle ondergronden",
+        "metaal", "hout", "beton", "steen", "muur", "gips", "kunststof"
+    ]
+    ondergrond_filter = st.selectbox(
+        "Ondergrond",
+        options=ondergrond_opties,
+        index=0,
+        help="Filter op ondergrond (bijv. metaal → geeft alleen metaalprimers)"
+    )
+
     st.divider()
-    st.caption("💡 Tip: Stel vragen zoals:\n- 'Welke primer gebruik ik op nieuw hout buiten?'\n- 'Rubbol Bl Azura droogtijd'\n- 'Verf bladert, wat nu?'")
+    st.caption("💡 Tip: Stel vragen zoals:\n- 'Welke primer gebruik ik op nieuw hout buiten?'\n- 'Rubbol BL Azura droogtijd'\n- 'Verf bladert, wat nu?'")
 
     if st.button("🗑️ Gesprek wissen"):
         st.session_state.berichten = []
@@ -89,27 +112,32 @@ if vraag:
 
             # Supabase RPC aanroep met filters
             rpc_params = {
-                "query_embedding": embedding,
-                "aantal": 6,
-                "filter_markt":    None if markt_filter == "Beide" else markt_filter,
-                "filter_segment":  None if segment_filter == "Beide" else segment_filter,
-                "filter_merk":     None if merk_filter == "Alle merken" else merk_filter,
+                "query_embedding":    embedding,
+                "aantal":             12,
+                "filter_markt":       None if markt_filter == "Beide" else markt_filter,
+                "filter_segment":     None if segment_filter == "Beide" else segment_filter,
+                "filter_merk":        None if merk_filter == "Alle merken" else merk_filter,
+                "filter_producttype": None if producttype_filter == "Alle types" else producttype_filter,
+                "filter_ondergrond":  None if ondergrond_filter == "Alle ondergronden" else ondergrond_filter,
             }
 
             try:
                 resultaten = supabase.rpc("zoek_documenten", rpc_params).execute()
                 docs = resultaten.data or []
             except Exception as e:
-                # Fallback zonder filters als RPC parameters niet kloppen
+                # Fallback zonder extra filters als RPC parameters niet kloppen
                 docs = supabase.rpc("zoek_documenten", {
                     "query_embedding": embedding,
-                    "aantal": 6
+                    "aantal": 12,
+                    "filter_markt":   None if markt_filter == "Beide" else markt_filter,
+                    "filter_segment": None if segment_filter == "Beide" else segment_filter,
+                    "filter_merk":    None if merk_filter == "Alle merken" else merk_filter,
                 }).execute().data or []
 
             if not docs:
                 antwoord = (
-                    "Ik kon geen relevante informatie vinden in de datasheets voor deze vraag. "
-                    "Probeer een specifiekere productnaam of pas de filters aan."
+                    "Geen TDS beschikbaar voor dit product of deze combinatie van filters. "
+                    "Controleer de filters (markt, segment, merk, ondergrond) of stel de vraag anders."
                 )
                 st.markdown(antwoord)
             else:
@@ -118,19 +146,25 @@ if vraag:
                 bronnen = []
 
                 for r in docs:
-                    product  = r.get("product_naam", "Onbekend")
-                    merk_doc = r.get("merk", "")
-                    markt_doc= r.get("markt", "")
-                    inhoud   = r.get("inhoud", "")
-                    bestand  = r.get("bestandsnaam", "")
+                    product      = r.get("product_naam", "Onbekend")
+                    merk_doc     = r.get("merk", "")
+                    markt_doc    = r.get("markt", "")
+                    segment_doc  = r.get("segment", "")
+                    producttype_doc = r.get("producttype", "")
+                    ondergrond_doc  = r.get("ondergrond", "")
+                    inhoud       = r.get("inhoud", "")
+                    bestand      = r.get("bestandsnaam", "")
+                    similarity   = r.get("similarity", 0)
 
                     context_stukken.append(
-                        f"[{merk_doc} — {product} ({markt_doc})]\n{inhoud}"
+                        f"[{merk_doc} — {product} | {markt_doc}/{segment_doc} | "
+                        f"type: {producttype_doc} | ondergrond: {ondergrond_doc} | "
+                        f"bestand: {bestand}]\n{inhoud}"
                     )
 
-                    bron_label = f"{merk_doc} — {product} ({markt_doc})"
+                    bron_label = f"{merk_doc} — {product} ({markt_doc}) · {bestand}"
                     if bron_label not in bronnen:
-                        bronnen.append(bron_label)
+                        bronnen.append((bron_label, round(similarity, 3)))
 
                 context = "\n\n---\n\n".join(context_stukken)
 
@@ -142,21 +176,25 @@ if vraag:
                     filter_info += f" Segment: {segment_filter}."
                 if merk_filter != "Alle merken":
                     filter_info += f" Merk: {merk_filter}."
+                if producttype_filter != "Alle types":
+                    filter_info += f" Producttype: {producttype_filter}."
+                if ondergrond_filter != "Alle ondergronden":
+                    filter_info += f" Ondergrond: {ondergrond_filter}."
 
                 systeem_prompt = f"""Je bent een deskundige technisch assistent voor verfproducten van AkzoNobel Benelux.
 Je helpt medewerkers van de technische supportafdeling om klanten snel en correct te helpen.
 
-REGELS:
-- Beantwoord uitsluitend op basis van de meegeleverde productinformatie uit de technische datasheets.
-- Gebruik GEEN algemene verfkennis die niet in de datasheets staat.
-- Als de informatie niet in de datasheets staat, zeg dat dan eerlijk.
-- Geef praktische, concrete antwoorden — de medewerker heeft een klant aan de lijn.
-- Noem altijd het exacte productmerk en de productnaam.
-- Als er een verschil is tussen NL en BE versies, benoem dat.
+STRIKTE REGELS:
+- Beantwoord UITSLUITEND op basis van de meegeleverde TDS-context hieronder. Gebruik NOOIT algemene verfkennis.
+- Als het antwoord NIET in de meegeleverde datasheets staat, zeg dan letterlijk: "Deze informatie staat niet in de beschikbare datasheets."
+- Verwijs nooit naar producten die niet in de context staan.
+- Let op het documenttype in de context: een [type: eindlaag] is GEEN primer, ook al noemt het datasheet een primer als aanbevolen grondlaag.
+- Noem altijd de exacte productnaam en het merk zoals vermeld in de context.
+- Als er NL én BE versies beschikbaar zijn voor hetzelfde product, benoem dan het verschil.
 - Antwoord altijd in het Nederlands.
-- Wees bondig: maximaal 5 zinnen tenzij de vraag om meer detail vraagt.{filter_info}
+- Wees bondig en praktisch — de medewerker heeft een klant aan de lijn.{filter_info}
 
-PRODUCTINFORMATIE UIT DATASHEETS:
+TDS-CONTEXT (alleen deze bronnen gebruiken):
 {context}"""
 
                 response = claude.messages.create(
@@ -171,10 +209,10 @@ PRODUCTINFORMATIE UIT DATASHEETS:
                 # Antwoord tonen
                 st.markdown(antwoord)
 
-                # Bronnen tonen
+                # Bronnen tonen met similarity score
                 if bronnen:
                     with st.expander(f"📄 Gebruikte bronnen ({len(bronnen)})"):
-                        for bron in bronnen:
-                            st.caption(f"• {bron}")
+                        for bron, score in bronnen:
+                            st.caption(f"• {bron}  _(score: {score})_")
 
         st.session_state.berichten.append({"rol": "assistant", "tekst": antwoord})
