@@ -60,22 +60,70 @@ def detecteer_locatie(tekst: str) -> str | None:
 
 def detecteer_metaaltype(tekst: str) -> str | None:
     t = tekst.lower()
-    if any(w in t for w in ["staal", "ijzer", "ferro"]):
+    if any(w in t for w in ["staal", "ijzer", "ferro"]) and "non-ferro" not in t:
         return "ferro"
     if any(w in t for w in ["aluminium", "zink", "non-ferro", "nonferro"]):
         return "non-ferro"
     return None
 
+def detecteer_markt(tekst: str) -> str | None:
+    t = tekst.lower()
+    if any(w in t for w in ["nederland", "nl ", "nl-", "nederlandse"]):
+        return "NL"
+    if any(w in t for w in ["belgië", "belgie", "be ", "belgische", "belgisch"]):
+        return "BE"
+    return None
+
+def detecteer_segment(tekst: str) -> str | None:
+    t = tekst.lower()
+    if any(w in t for w in ["professioneel", "prof ", "schilder", "vakman", "aannemer"]):
+        return "PROF"
+    if any(w in t for w in ["particulier", "diy", "doe-het-zelf", "consument"]):
+        return "DIY"
+    return None
+
+BEKENDE_MERKEN = [
+    "sikkens", "trimetal", "flexa", "dulux", "levis",
+    "alabastine", "cetabever", "hammerite", "herbol", "glitsa", "xyla", "meesterhand"
+]
+
+def detecteer_merk(tekst: str) -> str | None:
+    t = tekst.lower()
+    for merk in BEKENDE_MERKEN:
+        if merk in t:
+            return merk.capitalize()
+    return None
+
 # ── Vervolgvragen bepalen (voor Claude-call) ──────────────────────────────────
-def bepaal_vervolgvragen(vraag: str, antwoorden: dict) -> dict | None:
+def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
+                          markt_filter: str, segment_filter: str, merk_filter: str) -> dict | None:
     """Geeft de eerstvolgende benodigde vervolgvraag terug, of None als genoeg context."""
     alles = vraag + " " + " ".join(antwoorden.values())
     producttype = detecteer_producttype(alles)
     ondergrond  = detecteer_ondergrond(alles)
     locatie     = detecteer_locatie(alles)
     metaaltype  = detecteer_metaaltype(alles)
+    markt       = detecteer_markt(alles)
+    segment     = detecteer_segment(alles)
+    merk        = detecteer_merk(alles)
 
-    # Primer zonder ondergrond
+    # 1. Markt / land — als sidebar op "Beide" staat en niet duidelijk uit vraag
+    if markt_filter == "Beide" and not markt and "markt" not in antwoorden:
+        return {
+            "key": "markt",
+            "vraag": "Voor welke markt / welk land?",
+            "opties": ["🇳🇱 Nederland (NL)", "🇧🇪 België (BE)", "Beide landen"]
+        }
+
+    # 2. Segment — als sidebar op "Beide" staat
+    if segment_filter == "Beide" and not segment and "segment" not in antwoorden:
+        return {
+            "key": "segment",
+            "vraag": "Voor professioneel gebruik of particulier?",
+            "opties": ["🔧 Professioneel / schilder (PROF)", "🏠 Particulier / DIY", "Beide"]
+        }
+
+    # 3. Primer zonder ondergrond
     if producttype in ("primer", "grondverf") and not ondergrond:
         return {
             "key": "ondergrond",
@@ -84,7 +132,7 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict) -> dict | None:
                        "Hout 🪵", "Beton/steen 🧱", "Gips/muur 🏠", "Kunststof 🔵"]
         }
 
-    # Metaalprimer: ferro of non-ferro?
+    # 4. Metaalprimer: ferro of non-ferro?
     if producttype in ("primer", "grondverf") and ondergrond == "metaal" and not metaaltype:
         return {
             "key": "metaaltype",
@@ -92,7 +140,7 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict) -> dict | None:
             "opties": ["Staal/ijzer (ferro) 🔩", "Aluminium/zink (non-ferro) ✨", "Beide / weet ik niet"]
         }
 
-    # Primer/beits/lak zonder buiten/binnen
+    # 5. Primer/beits/lak zonder buiten/binnen
     if producttype in ("primer", "eindlaag", "beits", "lak") and not locatie:
         return {
             "key": "locatie",
@@ -100,12 +148,21 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict) -> dict | None:
             "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]
         }
 
-    # Hout zonder locatie
+    # 6. Hout zonder locatie
     if ondergrond == "hout" and not locatie:
         return {
             "key": "locatie",
             "vraag": "Binnen of buiten?",
             "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]
+        }
+
+    # 7. Merkvoorkeur — alleen als niet al gekozen via sidebar
+    if merk_filter == "Alle merken" and not merk and "merk" not in antwoorden:
+        return {
+            "key": "merk",
+            "vraag": "Is er een merkvoorkeur?",
+            "opties": ["Sikkens", "Trimetal", "Flexa", "Dulux", "Levis",
+                       "Hammerite", "Alabastine", "Geen voorkeur"]
         }
 
     return None  # Genoeg context, ga naar Claude
@@ -211,7 +268,8 @@ if verwerk_nu and st.session_state.originele_vraag:
     antwoorden = st.session_state.antwoorden
 
     # Volgende vervolgvraag nodig?
-    volgende = bepaal_vervolgvragen(originele, antwoorden)
+    volgende = bepaal_vervolgvragen(originele, antwoorden,
+                                    markt_filter, segment_filter, merk_filter)
 
     if volgende:
         # Sla vervolgvraag op en toon knoppen bij volgende render
@@ -227,10 +285,37 @@ if verwerk_nu and st.session_state.originele_vraag:
         with st.chat_message("assistant"):
             with st.spinner("Zoeken in datasheets..."):
 
-                # Detectie op basis van volledige context
+                # Detectie op basis van volledige context (inclusief antwoorden)
                 alles = verrijkte_vraag
                 auto_producttype = detecteer_producttype(alles)
                 auto_ondergrond  = detecteer_ondergrond(alles)
+
+                # Markt uit antwoorden of sidebar
+                actief_markt = None
+                if markt_filter != "Beide":
+                    actief_markt = markt_filter
+                elif "markt" in antwoorden:
+                    if "NL" in antwoorden["markt"] or "Nederland" in antwoorden["markt"]:
+                        actief_markt = "NL"
+                    elif "BE" in antwoorden["markt"] or "België" in antwoorden["markt"]:
+                        actief_markt = "BE"
+
+                # Segment uit antwoorden of sidebar
+                actief_segment = None
+                if segment_filter != "Beide":
+                    actief_segment = segment_filter
+                elif "segment" in antwoorden:
+                    if "PROF" in antwoorden["segment"] or "Professioneel" in antwoorden["segment"]:
+                        actief_segment = "PROF"
+                    elif "DIY" in antwoorden["segment"] or "Particulier" in antwoorden["segment"]:
+                        actief_segment = "DIY"
+
+                # Merk uit antwoorden of sidebar
+                actief_merk = None
+                if merk_filter != "Alle merken":
+                    actief_merk = merk_filter
+                elif "merk" in antwoorden and antwoorden["merk"] != "Geen voorkeur":
+                    actief_merk = antwoorden["merk"]
 
                 if producttype_filter == "Automatisch":
                     actief_producttype = auto_producttype
@@ -251,9 +336,9 @@ if verwerk_nu and st.session_state.originele_vraag:
                 rpc_params = {
                     "query_embedding":    embedding,
                     "aantal":             12,
-                    "filter_markt":       None if markt_filter == "Beide" else markt_filter,
-                    "filter_segment":     None if segment_filter == "Beide" else segment_filter,
-                    "filter_merk":        None if merk_filter == "Alle merken" else merk_filter,
+                    "filter_markt":       actief_markt,
+                    "filter_segment":     actief_segment,
+                    "filter_merk":        actief_merk,
                     "filter_producttype": actief_producttype,
                     "filter_ondergrond":  actief_ondergrond,
                 }
@@ -261,12 +346,23 @@ if verwerk_nu and st.session_state.originele_vraag:
                 try:
                     docs = supabase.rpc("zoek_documenten", rpc_params).execute().data or []
                 except Exception:
-                    docs = supabase.rpc("zoek_documenten", {
-                        "query_embedding": embedding, "aantal": 12,
-                        "filter_markt":   None if markt_filter == "Beide" else markt_filter,
-                        "filter_segment": None if segment_filter == "Beide" else segment_filter,
-                        "filter_merk":    None if merk_filter == "Alle merken" else merk_filter,
-                    }).execute().data or []
+                    docs = []
+
+                # Fallback 1: zonder producttype-filter (lost "geen resultaat" bij primer op op)
+                if not docs and actief_producttype:
+                    try:
+                        rpc2 = {**rpc_params, "filter_producttype": None}
+                        docs = supabase.rpc("zoek_documenten", rpc2).execute().data or []
+                    except Exception:
+                        docs = []
+
+                # Fallback 2: zonder ondergrond-filter
+                if not docs and actief_ondergrond:
+                    try:
+                        rpc3 = {**rpc_params, "filter_producttype": None, "filter_ondergrond": None}
+                        docs = supabase.rpc("zoek_documenten", rpc3).execute().data or []
+                    except Exception:
+                        docs = []
 
                 # Context opbouwen
                 context_stukken, bronnen = [], []
