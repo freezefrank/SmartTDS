@@ -94,6 +94,56 @@ def detecteer_merk(tekst: str) -> str | None:
             return merk.capitalize()
     return None
 
+# Merken per markt/segment combinatie
+MERKEN_NL_PROF = ["Sikkens", "Trimetal", "Herbol", "Meesterhand"]
+MERKEN_NL_DIY  = ["Alabastine", "Cetabever", "Flexa", "Glitsa", "Hammerite"]
+MERKEN_BE_PROF = ["Sikkens", "Trimetal", "Herbol"]
+MERKEN_BE_DIY  = ["Dulux", "Hammerite", "Levis", "Xyla"]
+
+def merken_voor_context(markt: str, segment: str, antwoorden: dict) -> list:
+    """Geeft de beschikbare merken terug op basis van actieve markt en segment."""
+    # Bepaal actieve markt en segment (sidebar óf antwoorden)
+    act_markt   = markt
+    act_segment = segment
+
+    if act_markt == "Beide" and "markt" in antwoorden:
+        if "NL" in antwoorden["markt"] or "Nederland" in antwoorden["markt"]:
+            act_markt = "NL"
+        elif "BE" in antwoorden["markt"] or "België" in antwoorden["markt"]:
+            act_markt = "BE"
+
+    if act_segment == "Beide" and "segment" in antwoorden:
+        if "PROF" in antwoorden["segment"] or "Professioneel" in antwoorden["segment"]:
+            act_segment = "PROF"
+        elif "DIY" in antwoorden["segment"] or "Particulier" in antwoorden["segment"]:
+            act_segment = "DIY"
+
+    # Stel merklijst samen
+    if act_markt == "NL" and act_segment == "PROF": return MERKEN_NL_PROF
+    if act_markt == "NL" and act_segment == "DIY":  return MERKEN_NL_DIY
+    if act_markt == "BE" and act_segment == "PROF": return MERKEN_BE_PROF
+    if act_markt == "BE" and act_segment == "DIY":  return MERKEN_BE_DIY
+    if act_markt == "NL": return MERKEN_NL_PROF + MERKEN_NL_DIY
+    if act_markt == "BE": return MERKEN_BE_PROF + MERKEN_BE_DIY
+    if act_segment == "PROF": return list(dict.fromkeys(MERKEN_NL_PROF + MERKEN_BE_PROF))
+    if act_segment == "DIY":  return list(dict.fromkeys(MERKEN_NL_DIY  + MERKEN_BE_DIY))
+    return list(dict.fromkeys(MERKEN_NL_PROF + MERKEN_NL_DIY + MERKEN_BE_PROF + MERKEN_BE_DIY))
+
+EINDLAAG_TYPES = {"eindlaag", "aflak", "topcoat", "deklaag", "afwerklak", "coating"}
+
+def filter_eindlagen(docs: list, gevraagd_producttype: str | None) -> list:
+    """Verwijder eindlagen uit resultaten als er om een primer gevraagd wordt."""
+    if gevraagd_producttype not in ("primer", "grondverf"):
+        return docs
+    gefilterd = []
+    for doc in docs:
+        ptype = (doc.get("producttype") or "").lower()
+        # Behoud als producttype niet duidelijk een eindlaag is
+        if not any(e in ptype for e in EINDLAAG_TYPES):
+            gefilterd.append(doc)
+    # Als alles weggevallen is, geef origineel terug (beter iets dan niets)
+    return gefilterd if gefilterd else docs
+
 # ── Vervolgvragen bepalen (voor Claude-call) ──────────────────────────────────
 def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
                           markt_filter: str, segment_filter: str, merk_filter: str) -> dict | None:
@@ -156,13 +206,13 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
             "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]
         }
 
-    # 7. Merkvoorkeur — alleen als niet al gekozen via sidebar
+    # 7. Merkvoorkeur — gefilterd op actieve markt/segment
     if merk_filter == "Alle merken" and not merk and "merk" not in antwoorden:
+        beschikbare_merken = merken_voor_context(markt_filter, segment_filter, antwoorden)
         return {
             "key": "merk",
             "vraag": "Is er een merkvoorkeur?",
-            "opties": ["Sikkens", "Trimetal", "Flexa", "Dulux", "Levis",
-                       "Hammerite", "Alabastine", "Geen voorkeur"]
+            "opties": beschikbare_merken + ["Geen voorkeur"]
         }
 
     return None  # Genoeg context, ga naar Claude
@@ -363,6 +413,9 @@ if verwerk_nu and st.session_state.originele_vraag:
                         docs = supabase.rpc("zoek_documenten", rpc3).execute().data or []
                     except Exception:
                         docs = []
+
+                # Post-filter: verwijder eindlagen als er om een primer gevraagd wordt
+                docs = filter_eindlagen(docs, auto_producttype)
 
                 # Context opbouwen
                 context_stukken, bronnen = [], []
