@@ -1,6 +1,4 @@
 import os
-import re
-import json
 import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client
@@ -21,288 +19,331 @@ def laad_model():
 
 model = laad_model()
 
-# ── Slimme trefwoorddetectie ──────────────────────────────────────────────────
-def detecteer_producttype(vraag: str) -> str | None:
-    v = vraag.lower()
-    if any(w in v for w in ["primer", "grondverf", "grondlaag", "voorstrijk", "hechtprimer"]):
+# ── Trefwoorddetectie ─────────────────────────────────────────────────────────
+def detecteer_producttype(tekst: str) -> str | None:
+    t = tekst.lower()
+    if any(w in t for w in ["primer", "grondverf", "grondlaag", "voorstrijk", "hechtprimer"]):
         return "primer"
-    if any(w in v for w in ["eindlaag", "aflak", "topcoat", "deklaag"]):
+    if any(w in t for w in ["eindlaag", "aflak", "topcoat", "deklaag"]):
         return "eindlaag"
-    if any(w in v for w in ["beits", "beitslaag"]):
+    if any(w in t for w in ["beits"]):
         return "beits"
-    if any(w in v for w in ["lak", "laklaag"]):
+    if any(w in t for w in ["lak", "laklaag"]):
         return "lak"
-    if any(w in v for w in ["vulmiddel", "plamuur", "vuller"]):
+    if any(w in t for w in ["vulmiddel", "plamuur", "vuller"]):
         return "vulmiddel"
     return None
 
-def detecteer_ondergrond(vraag: str) -> str | None:
-    v = vraag.lower()
-    if any(w in v for w in ["metaal", "staal", "ijzer", "aluminium", "zink", "ferro"]):
+def detecteer_ondergrond(tekst: str) -> str | None:
+    t = tekst.lower()
+    if any(w in t for w in ["metaal", "staal", "ijzer", "ferro", "aluminium", "zink", "non-ferro"]):
         return "metaal"
-    if any(w in v for w in ["hout", "houten", "hardhout", "zachthout"]):
+    if any(w in t for w in ["hout", "houten", "hardhout", "zachthout"]):
         return "hout"
-    if any(w in v for w in ["beton"]):
+    if any(w in t for w in ["beton"]):
         return "beton"
-    if any(w in v for w in ["steen", "metselwerk", "gevel"]):
+    if any(w in t for w in ["steen", "metselwerk", "gevel"]):
         return "steen"
-    if any(w in v for w in ["gips", "gipsplaat"]):
+    if any(w in t for w in ["gips", "gipsplaat"]):
         return "gips"
-    if any(w in v for w in ["kunststof", "plastic", "pvc"]):
+    if any(w in t for w in ["kunststof", "plastic", "pvc"]):
         return "kunststof"
     return None
 
-def parse_keuzevraag(tekst: str):
-    """Haal keuzeblok uit Claude-respons. Geeft (schone_tekst, keuzedata) terug."""
-    patroon = r'\[KEUZEVRAAG\](.*?)\[/KEUZEVRAAG\]'
-    match = re.search(patroon, tekst, re.DOTALL)
-    if not match:
-        return tekst, None
-    try:
-        keuzedata = json.loads(match.group(1).strip())
-        schone_tekst = tekst[:match.start()].strip()
-        return schone_tekst, keuzedata
-    except Exception:
-        return tekst, None
+def detecteer_locatie(tekst: str) -> str | None:
+    t = tekst.lower()
+    if "buiten" in t or "exterieur" in t:
+        return "buiten"
+    if "binnen" in t or "interieur" in t:
+        return "binnen"
+    return None
+
+def detecteer_metaaltype(tekst: str) -> str | None:
+    t = tekst.lower()
+    if any(w in t for w in ["staal", "ijzer", "ferro"]):
+        return "ferro"
+    if any(w in t for w in ["aluminium", "zink", "non-ferro", "nonferro"]):
+        return "non-ferro"
+    return None
+
+# ── Vervolgvragen bepalen (voor Claude-call) ──────────────────────────────────
+def bepaal_vervolgvragen(vraag: str, antwoorden: dict) -> dict | None:
+    """Geeft de eerstvolgende benodigde vervolgvraag terug, of None als genoeg context."""
+    alles = vraag + " " + " ".join(antwoorden.values())
+    producttype = detecteer_producttype(alles)
+    ondergrond  = detecteer_ondergrond(alles)
+    locatie     = detecteer_locatie(alles)
+    metaaltype  = detecteer_metaaltype(alles)
+
+    # Primer zonder ondergrond
+    if producttype in ("primer", "grondverf") and not ondergrond:
+        return {
+            "key": "ondergrond",
+            "vraag": "Wat voor ondergrond?",
+            "opties": ["Staal/ijzer (ferro) 🔩", "Aluminium/zink (non-ferro) ✨",
+                       "Hout 🪵", "Beton/steen 🧱", "Gips/muur 🏠", "Kunststof 🔵"]
+        }
+
+    # Metaalprimer: ferro of non-ferro?
+    if producttype in ("primer", "grondverf") and ondergrond == "metaal" and not metaaltype:
+        return {
+            "key": "metaaltype",
+            "vraag": "Ferro of non-ferro metaal?",
+            "opties": ["Staal/ijzer (ferro) 🔩", "Aluminium/zink (non-ferro) ✨", "Beide / weet ik niet"]
+        }
+
+    # Primer/beits/lak zonder buiten/binnen
+    if producttype in ("primer", "eindlaag", "beits", "lak") and not locatie:
+        return {
+            "key": "locatie",
+            "vraag": "Binnen of buiten?",
+            "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]
+        }
+
+    # Hout zonder locatie
+    if ondergrond == "hout" and not locatie:
+        return {
+            "key": "locatie",
+            "vraag": "Binnen of buiten?",
+            "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]
+        }
+
+    return None  # Genoeg context, ga naar Claude
 
 # ── Pagina instellingen ───────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="SmartTDS Verfassistent",
-    page_icon="🎨",
-    layout="wide"
-)
+st.set_page_config(page_title="SmartTDS Verfassistent", page_icon="🎨", layout="wide")
 
 # ── Sessie initialiseren ──────────────────────────────────────────────────────
-if "berichten" not in st.session_state:
-    st.session_state.berichten = []
-if "pending_choices" not in st.session_state:
-    st.session_state.pending_choices = None  # {"vraag": "...", "opties": [...]}
-if "queued_message" not in st.session_state:
-    st.session_state.queued_message = None
+defaults = {
+    "berichten": [],
+    "pending_vraag": None,   # {"key", "vraag", "opties"}
+    "antwoorden": {},        # {"ondergrond": "Staal/ijzer", "locatie": "Buiten", ...}
+    "originele_vraag": None, # De originele gebruikersvraag
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ── Sidebar — Filters ─────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🎨 SmartTDS")
     st.caption("Technische ondersteuning op basis van officiële datasheets")
     st.divider()
-
     st.subheader("🔍 Filters")
 
-    markt_filter = st.selectbox("Markt", options=["Beide", "NL", "BE"], index=0)
-    segment_filter = st.selectbox("Segment", options=["Beide", "PROF", "DIY"], index=0)
-
-    merk_opties = [
-        "Alle merken", "Sikkens", "Trimetal", "Flexa", "Dulux", "Levis",
-        "Alabastine", "Cetabever", "Hammerite", "Herbol", "Glitsa", "Xyla", "Meesterhand"
-    ]
-    merk_filter = st.selectbox("Merk", options=merk_opties, index=0)
-
+    markt_filter    = st.selectbox("Markt", ["Beide", "NL", "BE"], index=0)
+    segment_filter  = st.selectbox("Segment", ["Beide", "PROF", "DIY"], index=0)
+    merk_opties     = ["Alle merken", "Sikkens", "Trimetal", "Flexa", "Dulux", "Levis",
+                       "Alabastine", "Cetabever", "Hammerite", "Herbol", "Glitsa", "Xyla", "Meesterhand"]
+    merk_filter     = st.selectbox("Merk", merk_opties, index=0)
     producttype_opties = ["Automatisch", "Alle types", "primer", "grondverf",
                           "eindlaag", "lak", "beits", "vulmiddel", "coating"]
-    producttype_filter = st.selectbox("Producttype", options=producttype_opties, index=0,
-        help="'Automatisch' detecteert het type uit je vraag")
-
-    ondergrond_opties = ["Automatisch", "Alle ondergronden",
-                         "metaal", "hout", "beton", "steen", "muur", "gips", "kunststof"]
-    ondergrond_filter = st.selectbox("Ondergrond", options=ondergrond_opties, index=0,
-        help="'Automatisch' detecteert de ondergrond uit je vraag")
-
+    producttype_filter = st.selectbox("Producttype", producttype_opties, index=0,
+                                      help="'Automatisch' detecteert het type uit je vraag")
+    ondergrond_opties  = ["Automatisch", "Alle ondergronden",
+                          "metaal", "hout", "beton", "steen", "muur", "gips", "kunststof"]
+    ondergrond_filter  = st.selectbox("Ondergrond", ondergrond_opties, index=0,
+                                      help="'Automatisch' detecteert de ondergrond uit je vraag")
     st.divider()
-    st.caption("💡 Tip: Stel vragen zoals:\n- 'Welke primer op staal buiten?'\n- 'Rubbol BL Azura droogtijd'\n- 'Verf bladert, wat nu?'")
+    st.caption("💡 Tip:\n- 'Welke primer op staal buiten?'\n- 'Rubbol BL Azura droogtijd'\n- 'Verf bladert, wat nu?'")
 
     if st.button("🗑️ Gesprek wissen"):
-        st.session_state.berichten = []
-        st.session_state.pending_choices = None
-        st.session_state.queued_message = None
+        for k in ["berichten", "pending_vraag", "antwoorden", "originele_vraag"]:
+            st.session_state[k] = [] if k == "berichten" else {} if k == "antwoorden" else None
         st.rerun()
 
 # ── Hoofd interface ───────────────────────────────────────────────────────────
 st.title("SmartTDS Verfassistent")
 st.write("Stel een vraag over verfproducten en krijg een antwoord op basis van de officiële technische datasheets.")
 
-# Berichtengeschiedenis tonen
+# Gespreksgeschiedenis tonen
 for bericht in st.session_state.berichten:
     with st.chat_message(bericht["rol"]):
         st.markdown(bericht["tekst"])
 
-# ── Keuzeknopjes tonen (verduidelijkingsvragen) ───────────────────────────────
-if st.session_state.pending_choices:
-    pc = st.session_state.pending_choices
+# ── Keuzeknopjes tonen ────────────────────────────────────────────────────────
+if st.session_state.pending_vraag:
+    pv = st.session_state.pending_vraag
     with st.chat_message("assistant"):
-        st.markdown(f"**{pc['vraag']}**")
-        opties = pc["opties"]
-        # Max 4 per rij
+        st.markdown(f"**{pv['vraag']}**")
+        opties = pv["opties"]
         for rij_start in range(0, len(opties), 4):
-            rij = opties[rij_start:rij_start + 4]
+            rij  = opties[rij_start:rij_start + 4]
             cols = st.columns(len(rij))
             for i, optie in enumerate(rij):
                 nummer = rij_start + i + 1
-                if cols[i].button(f"{nummer}. {optie}", key=f"keuze_{rij_start}_{i}", use_container_width=True):
-                    # Keuze opslaan als queued bericht
+                if cols[i].button(f"{nummer}. {optie}", key=f"keuze_{rij_start}_{i}",
+                                   use_container_width=True):
+                    # Sla antwoord op in berichten + antwoorden
                     st.session_state.berichten.append({
                         "rol": "assistant",
-                        "tekst": f"**{pc['vraag']}**"
+                        "tekst": f"**{pv['vraag']}**"
                     })
-                    st.session_state.pending_choices = None
-                    st.session_state.queued_message = optie
+                    st.session_state.berichten.append({"rol": "user", "tekst": optie})
+                    st.session_state.antwoorden[pv["key"]] = optie
+                    st.session_state.pending_vraag = None
                     st.rerun()
 
-# ── Vraag ophalen (getypt of via knop) ───────────────────────────────────────
-if st.session_state.queued_message:
-    vraag = st.session_state.queued_message
-    st.session_state.queued_message = None
-else:
-    vraag = st.chat_input("Stel je vraag...")
+# ── Chat input ────────────────────────────────────────────────────────────────
+vraag_input = st.chat_input("Stel je vraag...",
+                             disabled=st.session_state.pending_vraag is not None)
 
-# ── Vraag verwerken ───────────────────────────────────────────────────────────
-if vraag:
-    st.session_state.berichten.append({"rol": "user", "tekst": vraag})
+# ── Verwerk nieuwe vraag of doorgaan na keuze ─────────────────────────────────
+verwerk_nu = False
+if vraag_input:
+    # Nieuwe vraag: reset context
+    st.session_state.originele_vraag = vraag_input
+    st.session_state.antwoorden      = {}
+    st.session_state.pending_vraag   = None
+    st.session_state.berichten.append({"rol": "user", "tekst": vraag_input})
     with st.chat_message("user"):
-        st.markdown(vraag)
+        st.markdown(vraag_input)
+    verwerk_nu = True
 
-    with st.chat_message("assistant"):
-        with st.spinner("Zoeken in datasheets..."):
+elif (st.session_state.originele_vraag
+      and not st.session_state.pending_vraag
+      and st.session_state.antwoorden):
+    # Gebruiker heeft een keuze gemaakt — check of meer vragen nodig zijn
+    verwerk_nu = True
 
-            # Automatische detectie
-            auto_producttype = detecteer_producttype(vraag)
-            auto_ondergrond  = detecteer_ondergrond(vraag)
+if verwerk_nu and st.session_state.originele_vraag:
+    originele = st.session_state.originele_vraag
+    antwoorden = st.session_state.antwoorden
 
-            if producttype_filter == "Automatisch":
-                actief_producttype = auto_producttype
-            elif producttype_filter == "Alle types":
-                actief_producttype = None
-            else:
-                actief_producttype = producttype_filter
+    # Volgende vervolgvraag nodig?
+    volgende = bepaal_vervolgvragen(originele, antwoorden)
 
-            if ondergrond_filter == "Automatisch":
-                actief_ondergrond = auto_ondergrond
-            elif ondergrond_filter == "Alle ondergronden":
-                actief_ondergrond = None
-            else:
-                actief_ondergrond = ondergrond_filter
+    if volgende:
+        # Sla vervolgvraag op en toon knoppen bij volgende render
+        st.session_state.pending_vraag = volgende
+        st.rerun()
+    else:
+        # Genoeg context — bouw verrijkte vraag en roep Claude aan
+        verrijkte_vraag = originele
+        if antwoorden:
+            extra = ", ".join(f"{k}: {v}" for k, v in antwoorden.items())
+            verrijkte_vraag += f" ({extra})"
 
-            # Supabase RPC
-            embedding = model.encode(vraag).tolist()
-            rpc_params = {
-                "query_embedding":    embedding,
-                "aantal":             12,
-                "filter_markt":       None if markt_filter == "Beide" else markt_filter,
-                "filter_segment":     None if segment_filter == "Beide" else segment_filter,
-                "filter_merk":        None if merk_filter == "Alle merken" else merk_filter,
-                "filter_producttype": actief_producttype,
-                "filter_ondergrond":  actief_ondergrond,
-            }
+        with st.chat_message("assistant"):
+            with st.spinner("Zoeken in datasheets..."):
 
-            try:
-                resultaten = supabase.rpc("zoek_documenten", rpc_params).execute()
-                docs = resultaten.data or []
-            except Exception:
-                docs = supabase.rpc("zoek_documenten", {
-                    "query_embedding": embedding,
-                    "aantal": 12,
-                    "filter_markt":   None if markt_filter == "Beide" else markt_filter,
-                    "filter_segment": None if segment_filter == "Beide" else segment_filter,
-                    "filter_merk":    None if merk_filter == "Alle merken" else merk_filter,
-                }).execute().data or []
+                # Detectie op basis van volledige context
+                alles = verrijkte_vraag
+                auto_producttype = detecteer_producttype(alles)
+                auto_ondergrond  = detecteer_ondergrond(alles)
 
-            # Context opbouwen
-            context_stukken = []
-            bronnen = []
-            for r in (docs or []):
-                product         = r.get("product_naam", "Onbekend")
-                merk_doc        = r.get("merk", "")
-                markt_doc       = r.get("markt", "")
-                segment_doc     = r.get("segment", "")
-                producttype_doc = r.get("producttype", "")
-                ondergrond_doc  = r.get("ondergrond", "")
-                inhoud          = r.get("inhoud", "")
-                bestand         = r.get("bestandsnaam", "")
-                similarity      = r.get("similarity", 0)
+                if producttype_filter == "Automatisch":
+                    actief_producttype = auto_producttype
+                elif producttype_filter == "Alle types":
+                    actief_producttype = None
+                else:
+                    actief_producttype = producttype_filter
 
-                context_stukken.append(
-                    f"[{merk_doc} — {product} | {markt_doc}/{segment_doc} | "
-                    f"type: {producttype_doc} | ondergrond: {ondergrond_doc} | "
-                    f"bestand: {bestand}]\n{inhoud}"
-                )
-                bron_label = f"{merk_doc} — {product} ({markt_doc}) · {bestand}"
-                if bron_label not in [b for b, _ in bronnen]:
-                    bronnen.append((bron_label, round(similarity, 3)))
+                if ondergrond_filter == "Automatisch":
+                    actief_ondergrond = auto_ondergrond
+                elif ondergrond_filter == "Alle ondergronden":
+                    actief_ondergrond = None
+                else:
+                    actief_ondergrond = ondergrond_filter
 
-            context = "\n\n---\n\n".join(context_stukken) if context_stukken else ""
+                # Supabase RPC
+                embedding  = model.encode(verrijkte_vraag).tolist()
+                rpc_params = {
+                    "query_embedding":    embedding,
+                    "aantal":             12,
+                    "filter_markt":       None if markt_filter == "Beide" else markt_filter,
+                    "filter_segment":     None if segment_filter == "Beide" else segment_filter,
+                    "filter_merk":        None if merk_filter == "Alle merken" else merk_filter,
+                    "filter_producttype": actief_producttype,
+                    "filter_ondergrond":  actief_ondergrond,
+                }
 
-            # Filter-info
-            filter_info = ""
-            if markt_filter != "Beide": filter_info += f" Markt: {markt_filter}."
-            if segment_filter != "Beide": filter_info += f" Segment: {segment_filter}."
-            if merk_filter != "Alle merken": filter_info += f" Merk: {merk_filter}."
-            if actief_producttype: filter_info += f" Producttype: {actief_producttype}."
-            if actief_ondergrond: filter_info += f" Ondergrond: {actief_ondergrond}."
+                try:
+                    docs = supabase.rpc("zoek_documenten", rpc_params).execute().data or []
+                except Exception:
+                    docs = supabase.rpc("zoek_documenten", {
+                        "query_embedding": embedding, "aantal": 12,
+                        "filter_markt":   None if markt_filter == "Beide" else markt_filter,
+                        "filter_segment": None if segment_filter == "Beide" else segment_filter,
+                        "filter_merk":    None if merk_filter == "Alle merken" else merk_filter,
+                    }).execute().data or []
 
-            # Gespreksgeschiedenis opbouwen voor Claude
-            gesprek = []
-            for b in st.session_state.berichten[:-1]:  # alles behalve huidige vraag
-                rol = "user" if b["rol"] == "user" else "assistant"
-                gesprek.append({"role": rol, "content": b["tekst"]})
-            gesprek.append({"role": "user", "content": vraag})
+                # Context opbouwen
+                context_stukken, bronnen = [], []
+                for r in docs:
+                    product  = r.get("product_naam", "Onbekend")
+                    merk_doc = r.get("merk", "")
+                    markt_doc= r.get("markt", "")
+                    seg_doc  = r.get("segment", "")
+                    ptype    = r.get("producttype", "")
+                    ond      = r.get("ondergrond", "")
+                    inhoud   = r.get("inhoud", "")
+                    bestand  = r.get("bestandsnaam", "")
+                    score    = round(r.get("similarity", 0), 3)
 
-            systeem_prompt = f"""Je bent een deskundige technisch assistent voor verfproducten van AkzoNobel Benelux.
+                    context_stukken.append(
+                        f"[{merk_doc} — {product} | {markt_doc}/{seg_doc} | "
+                        f"type: {ptype} | ondergrond: {ond} | bestand: {bestand}]\n{inhoud}"
+                    )
+                    label = f"{merk_doc} — {product} ({markt_doc}) · {bestand}"
+                    if label not in [b for b, _ in bronnen]:
+                        bronnen.append((label, score))
+
+                context = "\n\n---\n\n".join(context_stukken) if context_stukken else ""
+
+                filter_info = ""
+                if markt_filter != "Beide":       filter_info += f" Markt: {markt_filter}."
+                if segment_filter != "Beide":     filter_info += f" Segment: {segment_filter}."
+                if merk_filter != "Alle merken":  filter_info += f" Merk: {merk_filter}."
+                if actief_producttype:            filter_info += f" Producttype: {actief_producttype}."
+                if actief_ondergrond:             filter_info += f" Ondergrond: {actief_ondergrond}."
+
+                # Gespreksgeschiedenis voor Claude
+                gesprek = []
+                for b in st.session_state.berichten:
+                    rol = "user" if b["rol"] == "user" else "assistant"
+                    gesprek.append({"role": rol, "content": b["tekst"]})
+                # Vervang laatste user bericht door verrijkte versie
+                if gesprek and gesprek[-1]["role"] == "user":
+                    gesprek[-1]["content"] = verrijkte_vraag
+                else:
+                    gesprek.append({"role": "user", "content": verrijkte_vraag})
+
+                systeem_prompt = f"""Je bent een deskundige technisch assistent voor verfproducten van AkzoNobel Benelux.
 Je helpt medewerkers van de technische supportafdeling om klanten snel en correct te helpen.
 
 STRIKTE REGELS:
 - Beantwoord UITSLUITEND op basis van de meegeleverde TDS-context. Gebruik NOOIT algemene verfkennis.
-- Als het antwoord NIET in de datasheets staat: "Geen TDS beschikbaar voor dit product."
+- Als het antwoord NIET in de datasheets staat: zeg "Geen TDS beschikbaar voor dit product."
 - Let op [type: ...]: een [type: eindlaag] is GEEN primer, ook al noemt die TDS een primer.
 - Noem altijd de exacte productnaam en het merk uit de context.
-- Antwoord in het Nederlands. Bondig en praktisch.{filter_info}
+- Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.{filter_info}
 
-VERDUIDELIJKINGSVRAGEN MET KEUZEMENU:
-Als de vraag te weinig context heeft voor een goed antwoord, geef dan EERST een korte uitleg waarom je meer info nodig hebt.
-Sluit daarna AF met een keuzeblok in dit exacte JSON-formaat:
+TDS-CONTEXT (alleen deze bronnen gebruiken):
+{context if context else "Geen relevante datasheets gevonden voor deze zoekcombinatie."}"""
 
-[KEUZEVRAAG]{{"vraag": "Jouw vraag hier?", "opties": ["Optie 1", "Optie 2", "Optie 3"]}}[/KEUZEVRAAG]
+                response = claude.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=800,
+                    system=systeem_prompt,
+                    messages=gesprek
+                )
 
-Gebruik dit keuzeblok ALLEEN als je echt meer context nodig hebt. Maximaal 1 keuzeblok per reactie.
-Voorbeeldvragen die een keuzemenu verdienen:
-- Primervraag zonder ondergrondtype → {{"vraag": "Wat voor ondergrond?", "opties": ["Staal/ijzer (ferro)", "Aluminium/zink (non-ferro)", "Beide"]}}
-- Primervraag zonder locatie → {{"vraag": "Binnen of buiten?", "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]}}
-- Houtvraag zonder detail → {{"vraag": "Welk houttype?", "opties": ["Nieuw hout", "Geschilderd hout", "Hardhout", "Zachthout"]}}
-Stel GEEN vragen als de context al duidelijk is.
+                antwoord = response.content[0].text
+                st.markdown(antwoord)
 
-TDS-CONTEXT:
-{context if context else "Geen relevante datasheets gevonden."}"""
-
-            response = claude.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=800,
-                system=systeem_prompt,
-                messages=gesprek
-            )
-
-            ruwe_tekst = response.content[0].text
-            schone_tekst, keuzedata = parse_keuzevraag(ruwe_tekst)
-
-            # Antwoord tonen
-            st.markdown(schone_tekst)
-
-            # Keuzeknopjes instellen voor volgende render
-            if keuzedata:
-                st.session_state.pending_choices = keuzedata
-
-            # Bronnen
-            if bronnen:
-                with st.expander(f"📄 Gebruikte bronnen ({len(bronnen)})"):
-                    if auto_producttype or auto_ondergrond:
+                if bronnen:
+                    with st.expander(f"📄 Gebruikte bronnen ({len(bronnen)})"):
                         detectie = []
                         if auto_producttype: detectie.append(f"producttype → **{auto_producttype}**")
-                        if auto_ondergrond: detectie.append(f"ondergrond → **{auto_ondergrond}**")
-                        st.caption(f"🔍 Automatisch gedetecteerd: {', '.join(detectie)}")
-                        st.divider()
-                    for bron, score in bronnen:
-                        st.caption(f"• {bron}  _(score: {score})_")
+                        if auto_ondergrond:  detectie.append(f"ondergrond → **{auto_ondergrond}**")
+                        if detectie:
+                            st.caption(f"🔍 Gedetecteerd: {', '.join(detectie)}")
+                            st.divider()
+                        for bron, score in bronnen:
+                            st.caption(f"• {bron}  _(score: {score})_")
 
-    # Sla antwoord op (zonder keuzeblok)
-    st.session_state.berichten.append({"rol": "assistant", "tekst": schone_tekst})
-
-    # Meteen rerun zodat keuzeknopjes verschijnen
-    if keuzedata:
-        st.rerun()
+        st.session_state.berichten.append({"rol": "assistant", "tekst": antwoord})
+        # Reset antwoorden voor volgende vraag
+        st.session_state.antwoorden    = {}
+        st.session_state.originele_vraag = None
