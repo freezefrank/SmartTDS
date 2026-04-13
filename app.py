@@ -381,11 +381,22 @@ if verwerk_nu and st.session_state.originele_vraag:
                 else:
                     actief_ondergrond = ondergrond_filter
 
-                # Supabase RPC
+                # Query-tekst opschonen voor full-text search
+                # Stopwoorden verwijderen zodat alleen inhoudelijke woorden overblijven
+                stopwoorden = {"ik", "een", "de", "het", "voor", "op", "in", "aan",
+                               "zoek", "wil", "wat", "welke", "is", "zijn", "heb",
+                               "van", "met", "te", "dat", "die", "ze", "bij"}
+                woorden = [w for w in verrijkte_vraag.lower().split()
+                           if w.isalpha() and w not in stopwoorden and len(w) > 2]
+                query_tekst = " ".join(woorden) if woorden else None
+
+                # Supabase RPC — hybrid search
                 embedding  = model.encode(verrijkte_vraag).tolist()
                 rpc_params = {
                     "query_embedding":    embedding,
+                    "query_tekst":        query_tekst,
                     "aantal":             12,
+                    "rrf_k":              60,
                     "filter_markt":       actief_markt,
                     "filter_segment":     actief_segment,
                     "filter_merk":        actief_merk,
@@ -398,7 +409,7 @@ if verwerk_nu and st.session_state.originele_vraag:
                 except Exception:
                     docs = []
 
-                # Fallback 1: zonder producttype-filter (lost "geen resultaat" bij primer op op)
+                # Fallback 1: zonder producttype-filter
                 if not docs and actief_producttype:
                     try:
                         rpc2 = {**rpc_params, "filter_producttype": None}

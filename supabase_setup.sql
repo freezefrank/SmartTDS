@@ -34,24 +34,59 @@ alter table documenten add column if not exists ondergrond   text;
 alter table documenten add column if not exists basis        text;
 alter table documenten add column if not exists verfsysteem  text;
 alter table documenten add column if not exists datum        text;
+alter table documenten add column if not exists inhoud_tsv   tsvector;
 
--- 4. Index voor sneller zoeken
+-- 4. Indexes voor sneller zoeken
 create index if not exists documenten_embedding_idx
     on documenten using ivfflat (embedding vector_cosine_ops)
     with (lists = 100);
 
 create index if not exists documenten_markt_idx on documenten (markt);
 create index if not exists documenten_merk_idx  on documenten (merk);
+create index if not exists documenten_tsv_idx   on documenten using gin(inhoud_tsv);
 
--- 5. Zoekfunctie met optionele metadata filters
+-- 5. Vul de tsvector kolom (eenmalig voor bestaande rijen)
+update documenten
+set inhoud_tsv = to_tsvector('dutch',
+    coalesce(inhoud, '') || ' ' ||
+    coalesce(product_naam, '') || ' ' ||
+    coalesce(merk, '') || ' ' ||
+    coalesce(producttype, '') || ' ' ||
+    coalesce(ondergrond, '')
+)
+where inhoud_tsv is null;
+
+-- 6. Trigger: houdt inhoud_tsv automatisch bij na insert/update
+create or replace function update_inhoud_tsv()
+returns trigger as $$
+begin
+    new.inhoud_tsv := to_tsvector('dutch',
+        coalesce(new.inhoud, '') || ' ' ||
+        coalesce(new.product_naam, '') || ' ' ||
+        coalesce(new.merk, '') || ' ' ||
+        coalesce(new.producttype, '') || ' ' ||
+        coalesce(new.ondergrond, '')
+    );
+    return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_update_inhoud_tsv on documenten;
+create trigger trg_update_inhoud_tsv
+    before insert or update on documenten
+    for each row execute function update_inhoud_tsv();
+
+-- 7. Hybrid zoekfunctie: vector + full-text met Reciprocal Rank Fusion (RRF)
 create or replace function zoek_documenten(
-    query_embedding   vector(384),
-    aantal            int     default 12,
-    filter_markt      text    default null,
-    filter_segment    text    default null,
-    filter_merk       text    default null,
-    filter_producttype text   default null,
-    filter_ondergrond text    default null
+    query_embedding    vector(384),
+    query_tekst        text    default null,  -- voor full-text zoeken
+    aantal             int     default 12,
+    rrf_k              int     default 60,    -- RRF constante (hoger = meer gewicht aan lage ranks)
+    filter_markt       text    default null,
+    filter_segment     text    default null,
+    filter_merk        text    default null,
+    filter_producttype text    default null,
+    filter_ondergrond  text    default null
 )
 returns table (
     id           bigint,
@@ -68,10 +103,61 @@ returns table (
     inhoud       text,
     similarity   float
 )
-language plpgsql
-as $$
+language plpgsql as $$
+declare
+    kandidaten int := aantal * 4;  -- ophalen meer kandidaten voor betere RRF fusie
 begin
     return query
+    with
+    -- ── Vector search ──────────────────────────────────────────────────────────
+    vector_hits as (
+        select
+            d.id,
+            row_number() over (order by d.embedding <=> query_embedding) as rnk,
+            1.0 - (d.embedding <=> query_embedding)                       as vscore
+        from documenten d
+        where
+            (filter_markt       is null or d.markt       = filter_markt)
+            and (filter_segment     is null or d.segment     = filter_segment)
+            and (filter_merk        is null or d.merk        = filter_merk)
+            and (filter_producttype is null or d.producttype ilike '%' || filter_producttype || '%')
+            and (filter_ondergrond  is null or d.ondergrond  ilike '%' || filter_ondergrond  || '%')
+        order by d.embedding <=> query_embedding
+        limit kandidaten
+    ),
+
+    -- ── Full-text search (alleen als query_tekst meegegeven is) ────────────────
+    fts_hits as (
+        select
+            d.id,
+            row_number() over (
+                order by ts_rank_cd(d.inhoud_tsv,
+                    websearch_to_tsquery('dutch', query_tekst), 32) desc
+            ) as rnk
+        from documenten d
+        where
+            query_tekst is not null
+            and d.inhoud_tsv @@ websearch_to_tsquery('dutch', query_tekst)
+            and (filter_markt       is null or d.markt       = filter_markt)
+            and (filter_segment     is null or d.segment     = filter_segment)
+            and (filter_merk        is null or d.merk        = filter_merk)
+            and (filter_producttype is null or d.producttype ilike '%' || filter_producttype || '%')
+            and (filter_ondergrond  is null or d.ondergrond  ilike '%' || filter_ondergrond  || '%')
+        limit kandidaten
+    ),
+
+    -- ── RRF fusie ──────────────────────────────────────────────────────────────
+    rrf as (
+        select
+            coalesce(v.id, f.id)                                             as id,
+            coalesce(1.0 / (rrf_k + v.rnk), 0.0)
+            + coalesce(1.0 / (rrf_k + f.rnk), 0.0)                         as rrf_score,
+            coalesce(v.vscore, 0.0)                                          as vscore
+        from vector_hits v
+        full outer join fts_hits f on v.id = f.id
+    )
+
+    -- ── Finale resultaten ──────────────────────────────────────────────────────
     select
         d.id,
         d.bestandsnaam,
@@ -85,15 +171,10 @@ begin
         d.ondergrond,
         d.basis,
         d.inhoud,
-        1 - (d.embedding <=> query_embedding) as similarity
-    from documenten d
-    where
-        (filter_markt       is null or d.markt       = filter_markt)
-        and (filter_segment     is null or d.segment     = filter_segment)
-        and (filter_merk        is null or d.merk        = filter_merk)
-        and (filter_producttype is null or d.producttype ilike '%' || filter_producttype || '%')
-        and (filter_ondergrond  is null or d.ondergrond  ilike '%' || filter_ondergrond  || '%')
-    order by d.embedding <=> query_embedding
+        r.rrf_score::float as similarity
+    from rrf r
+    join documenten d on d.id = r.id
+    order by r.rrf_score desc
     limit aantal;
 end;
 $$;
