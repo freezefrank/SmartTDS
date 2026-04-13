@@ -94,6 +94,33 @@ def detecteer_merk(tekst: str) -> str | None:
             return merk.capitalize()
     return None
 
+# Bekende productnaam-patronen (woorden die duiden op een exact product)
+PRODUCTNAAM_SIGNALEN = [
+    "rubbol", "redox", "autoclear", "alphaxylan", "cetol", "rubbol bl",
+    "rezisto", "uniprimer", "multiprimer", "safira", "endurance", "isoprimer",
+    "permacryl", "sigma", "levis", "hydroprimer", "flexa strak", "flexa muur"
+]
+
+def is_productnaam_zoekopdracht(vraag: str) -> bool:
+    """
+    Geeft True als de vraag waarschijnlijk een exacte productnaam bevat
+    en dus geen verduidelijkingsvragen nodig zijn.
+    """
+    v = vraag.lower().strip()
+    woorden = v.split()
+
+    # Directe productnaam-signalen
+    if any(p in v for p in PRODUCTNAAM_SIGNALEN):
+        return True
+
+    # Korte zoekopdracht (≤5 woorden) zonder categoriewoorden = waarschijnlijk productnaam
+    categoriewoorden = {"zoek", "welke", "welk", "wat", "voor", "primer", "grondverf",
+                        "eindlaag", "verf", "beits", "lak", "buiten", "binnen", "op"}
+    if len(woorden) <= 5 and not any(w in categoriewoorden for w in woorden):
+        return True
+
+    return False
+
 # Merken per markt/segment combinatie
 MERKEN_NL_PROF = ["Sikkens", "Trimetal", "Herbol", "Meesterhand"]
 MERKEN_NL_DIY  = ["Alabastine", "Cetabever", "Flexa", "Glitsa", "Hammerite"]
@@ -317,9 +344,12 @@ if verwerk_nu and st.session_state.originele_vraag:
     originele = st.session_state.originele_vraag
     antwoorden = st.session_state.antwoorden
 
-    # Volgende vervolgvraag nodig?
-    volgende = bepaal_vervolgvragen(originele, antwoorden,
-                                    markt_filter, segment_filter, merk_filter)
+    # Bij exacte productnaam: sla vervolgvragen over
+    if is_productnaam_zoekopdracht(originele):
+        volgende = None
+    else:
+        volgende = bepaal_vervolgvragen(originele, antwoorden,
+                                        markt_filter, segment_filter, merk_filter)
 
     if volgende:
         # Sla vervolgvraag op en toon knoppen bij volgende render
@@ -425,8 +455,33 @@ if verwerk_nu and st.session_state.originele_vraag:
                     except Exception:
                         docs = []
 
+                # Fallback 3: alleen full-text + merk, geen andere filters
+                # (vangt exacte productnamen op die verkeerde metadata hebben)
+                if not docs and query_tekst:
+                    try:
+                        rpc4 = {
+                            "query_embedding": embedding,
+                            "query_tekst":     query_tekst,
+                            "aantal":          12,
+                            "rrf_k":           60,
+                            "filter_merk":     actief_merk,
+                        }
+                        docs = supabase.rpc("zoek_documenten", rpc4).execute().data or []
+                    except Exception:
+                        docs = []
+
+                # Fallback 4: volledig open — alleen vector search, geen filters
+                if not docs:
+                    try:
+                        rpc5 = {"query_embedding": embedding, "aantal": 12}
+                        docs = supabase.rpc("zoek_documenten", rpc5).execute().data or []
+                    except Exception:
+                        docs = []
+
                 # Post-filter: verwijder eindlagen als er om een primer gevraagd wordt
-                docs = filter_eindlagen(docs, auto_producttype)
+                # (alleen bij categorie-zoekopdracht, niet bij exacte productnaam)
+                if not is_productnaam_zoekopdracht(originele or verrijkte_vraag):
+                    docs = filter_eindlagen(docs, auto_producttype)
 
                 # Context opbouwen
                 context_stukken, bronnen = [], []
