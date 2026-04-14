@@ -677,7 +677,9 @@ STRIKTE REGELS:
 - Let op [type: ...]: een [type: eindlaag] is GEEN primer, ook al noemt die TDS een primer.
 - Noem altijd de exacte productnaam en het merk uit de context.
 - Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.
-- STEL NOOIT ZELF VRAGEN aan de gebruiker. De interface regelt alle verduidelijkingsvragen via knoppen. Als er informatie ontbreekt, geef dan het best mogelijke antwoord op basis van wat je hebt en vermeld kort welke info voor een completer advies handig zou zijn — maar stel geen vragen in vraagvorm.{filter_info}{overheen_instructie}{verflaag_instructie}
+- STEL NOOIT ZELF VRAGEN aan de gebruiker. De interface regelt alle verduidelijkingsvragen via knoppen. Als er informatie ontbreekt, geef dan het best mogelijke antwoord op basis van wat je hebt en vermeld kort welke info voor een completer advies handig zou zijn — maar stel geen vragen in vraagvorm.
+- VERFSYSTEMEN: noem alleen systemen (grondlaag → tussenlaag → eindlaag) die letterlijk in één en dezelfde TDS beschreven staan. Combineer NOOIT zelf producten uit verschillende TDS-documenten tot een eigen systeem — dat kan technisch onjuist zijn. Als de TDS geen volledig systeem beschrijft, zeg dan dat de klant contact moet opnemen voor systeemadvies.
+- WATERGEDRAGEN vs. ALKYD: wees alert op de basis van producten. Een watergedragen primer mag niet zomaar worden afgewerkt met een alkyd-eindlaag. Vermeld de basis (watergedragen / oplosmiddelhoudend / epoxy / PU) zodat de medewerker de compatibiliteit kan beoordelen.{filter_info}{overheen_instructie}{verflaag_instructie}
 
 TDS-CONTEXT (alleen deze bronnen gebruiken):
 {context if context else "Geen relevante datasheets gevonden voor deze zoekcombinatie."}"""
@@ -704,11 +706,10 @@ TDS-CONTEXT (alleen deze bronnen gebruiken):
                             st.caption(f"• {bron}  _(score: {score})_")
 
         st.session_state.berichten.append({"rol": "assistant", "tekst": antwoord})
-        # Sla markt/segment/merk op in persistent_context voor volgende vragen
-        PERSISTENTE_KEYS = {"markt", "segment", "merk"}
-        for k, v in antwoorden.items():
-            if k in PERSISTENTE_KEYS:
-                st.session_state.persistent_context[k] = v
+        # Sla alleen markt op in persistent_context — segment en merk zijn te contextspecifiek
+        # (volgende vraag kan van een andere klant/segment zijn)
+        if "markt" in antwoorden:
+            st.session_state.persistent_context["markt"] = antwoorden["markt"]
         # Reset antwoorden voor volgende vraag
         st.session_state.antwoorden    = {}
         st.session_state.originele_vraag = None
