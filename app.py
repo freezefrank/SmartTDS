@@ -353,6 +353,23 @@ with st.sidebar:
             st.session_state[k] = [] if k == "berichten" else {} if k in ("antwoorden", "persistent_context") else None
         st.rerun()
 
+    # Export knop
+    if st.session_state.berichten:
+        regels = []
+        for b in st.session_state.berichten:
+            prefix = "👤 GEBRUIKER" if b["rol"] == "user" else "🤖 ASSISTENT"
+            regels.append(f"{prefix}:\n{b['tekst']}\n")
+        if st.session_state.get("persistent_context"):
+            regels.append(f"\n[Persistente context: {st.session_state.persistent_context}]")
+        export_tekst = "\n---\n".join(regels)
+        st.download_button(
+            label="📋 Exporteer gesprek",
+            data=export_tekst,
+            file_name="smarttds_gesprek.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+
 # ── Hoofd interface ───────────────────────────────────────────────────────────
 st.title("SmartTDS Verfassistent")
 st.write("Stel een vraag over verfproducten en krijg een antwoord op basis van de officiële technische datasheets.")
