@@ -706,10 +706,8 @@ TDS-CONTEXT (alleen deze bronnen gebruiken):
                             st.caption(f"• {bron}  _(score: {score})_")
 
         st.session_state.berichten.append({"rol": "assistant", "tekst": antwoord})
-        # Sla alleen markt op in persistent_context — segment en merk zijn te contextspecifiek
-        # (volgende vraag kan van een andere klant/segment zijn)
-        if "markt" in antwoorden:
-            st.session_state.persistent_context["markt"] = antwoorden["markt"]
+        # Geen persistent context — elke vraag is van een andere klant
+        # Markt/segment/merk worden per gesprek opnieuw gevraagd
         # Reset antwoorden voor volgende vraag
         st.session_state.antwoorden    = {}
         st.session_state.originele_vraag = None
