@@ -706,8 +706,11 @@ TDS-CONTEXT (alleen deze bronnen gebruiken):
                             st.caption(f"• {bron}  _(score: {score})_")
 
         st.session_state.berichten.append({"rol": "assistant", "tekst": antwoord})
-        # Geen persistent context — elke vraag is van een andere klant
-        # Markt/segment/merk worden per gesprek opnieuw gevraagd
+        # Bewaar markt/segment/merk binnen het gesprek — worden alleen gereset bij "Gesprek wissen"
+        PERSISTENTE_KEYS = {"markt", "segment", "merk"}
+        for k, v in antwoorden.items():
+            if k in PERSISTENTE_KEYS:
+                st.session_state.persistent_context[k] = v
         # Reset antwoorden voor volgende vraag
         st.session_state.antwoorden    = {}
         st.session_state.originele_vraag = None
