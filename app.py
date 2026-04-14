@@ -243,6 +243,46 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
             "opties": ["Staal/ijzer (ferro) 🔩", "Aluminium/zink (non-ferro) ✨", "Beide / weet ik niet"]
         }
 
+    # 4b. Kaal of voorzien van verflaag? (hout of metaal, niet bij overheen-vragen)
+    # Bij overheen-vragen is bestaande_laag al gevraagd
+    if (not is_overheen_vraag(vraag)
+            and ondergrond in ("hout", "metaal")
+            and producttype in ("primer", "grondverf", None)
+            and "ondergrond_staat" not in antwoorden):
+        return {
+            "key": "ondergrond_staat",
+            "vraag": "Is de ondergrond kaal of voorzien van een verflaag?",
+            "opties": ["Kaal / onbehandeld 🆕", "Voorzien van verflaag 🎨", "Weet ik niet"]
+        }
+
+    # 4c. Als er een verflaag is: wat voor type?
+    staat = antwoorden.get("ondergrond_staat", "")
+    if staat.startswith("Voorzien") and "bestaande_verflaag_type" not in antwoorden:
+        return {
+            "key": "bestaande_verflaag_type",
+            "vraag": "Wat voor verflaag is aanwezig?",
+            "opties": [
+                "Watergedragen (muurverf / emulsie) 💧",
+                "Alkyd / olieverf 🛢️",
+                "Epoxy of PU-coating 🔬",
+                "Beits of vernis 🪵",
+                "Weet ik niet"
+            ]
+        }
+
+    # 4d. Conditie van de bestaande verflaag?
+    if staat.startswith("Voorzien") and "verflaag_conditie" not in antwoorden:
+        return {
+            "key": "verflaag_conditie",
+            "vraag": "Wat is de conditie van de bestaande verflaag?",
+            "opties": [
+                "Goed gehecht, gave oppervlak ✅",
+                "Lichte afschilfering / krijtvorming ⚠️",
+                "Slechte conditie / veel afschilfering ❌",
+                "Weet ik niet"
+            ]
+        }
+
     # 5. Primer/beits/lak zonder buiten/binnen
     if producttype in ("primer", "eindlaag", "beits", "lak") and not locatie:
         return {
@@ -276,9 +316,10 @@ st.set_page_config(page_title="SmartTDS Verfassistent", page_icon="🎨", layout
 # ── Sessie initialiseren ──────────────────────────────────────────────────────
 defaults = {
     "berichten": [],
-    "pending_vraag": None,   # {"key", "vraag", "opties"}
-    "antwoorden": {},        # {"ondergrond": "Staal/ijzer", "locatie": "Buiten", ...}
-    "originele_vraag": None, # De originele gebruikersvraag
+    "pending_vraag": None,      # {"key", "vraag", "opties"}
+    "antwoorden": {},           # {"ondergrond": "Staal/ijzer", "locatie": "Buiten", ...}
+    "originele_vraag": None,    # De originele gebruikersvraag
+    "persistent_context": {},   # Blijft bewaard tussen vragen: markt, segment, merk
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -308,8 +349,8 @@ with st.sidebar:
     st.caption("💡 Tip:\n- 'Welke primer op staal buiten?'\n- 'Rubbol BL Azura droogtijd'\n- 'Verf bladert, wat nu?'")
 
     if st.button("🗑️ Gesprek wissen"):
-        for k in ["berichten", "pending_vraag", "antwoorden", "originele_vraag"]:
-            st.session_state[k] = [] if k == "berichten" else {} if k == "antwoorden" else None
+        for k in ["berichten", "pending_vraag", "antwoorden", "originele_vraag", "persistent_context"]:
+            st.session_state[k] = [] if k == "berichten" else {} if k in ("antwoorden", "persistent_context") else None
         st.rerun()
 
 # ── Hoofd interface ───────────────────────────────────────────────────────────
@@ -327,6 +368,8 @@ if st.session_state.pending_vraag:
     with st.chat_message("assistant"):
         st.markdown(f"**{pv['vraag']}**")
         opties = pv["opties"]
+
+        # Keuzeknopjes
         for rij_start in range(0, len(opties), 4):
             rij  = opties[rij_start:rij_start + 4]
             cols = st.columns(len(rij))
@@ -334,7 +377,6 @@ if st.session_state.pending_vraag:
                 nummer = rij_start + i + 1
                 if cols[i].button(f"{nummer}. {optie}", key=f"keuze_{rij_start}_{i}",
                                    use_container_width=True):
-                    # Sla antwoord op in berichten + antwoorden
                     st.session_state.berichten.append({
                         "rol": "assistant",
                         "tekst": f"**{pv['vraag']}**"
@@ -344,6 +386,26 @@ if st.session_state.pending_vraag:
                     st.session_state.pending_vraag = None
                     st.rerun()
 
+        # Vrij tekstveld als alternatief
+        st.caption("Of typ je eigen antwoord:")
+        with st.form(key=f"vrij_antwoord_{pv['key']}", clear_on_submit=True):
+            vrij_col, knop_col = st.columns([5, 1])
+            vrij_tekst = vrij_col.text_input(
+                label="Vrij antwoord",
+                placeholder=f"bijv. Douglas hout, Rubbol BL Primer, gegalvaniseerd staal...",
+                label_visibility="collapsed"
+            )
+            bevestig = knop_col.form_submit_button("✓", use_container_width=True)
+            if bevestig and vrij_tekst.strip():
+                st.session_state.berichten.append({
+                    "rol": "assistant",
+                    "tekst": f"**{pv['vraag']}**"
+                })
+                st.session_state.berichten.append({"rol": "user", "tekst": vrij_tekst.strip()})
+                st.session_state.antwoorden[pv["key"]] = vrij_tekst.strip()
+                st.session_state.pending_vraag = None
+                st.rerun()
+
 # ── Chat input ────────────────────────────────────────────────────────────────
 vraag_input = st.chat_input("Stel je vraag...",
                              disabled=st.session_state.pending_vraag is not None)
@@ -351,9 +413,9 @@ vraag_input = st.chat_input("Stel je vraag...",
 # ── Verwerk nieuwe vraag of doorgaan na keuze ─────────────────────────────────
 verwerk_nu = False
 if vraag_input:
-    # Nieuwe vraag: reset context
+    # Nieuwe vraag: reset context maar laad persistente info (markt/segment/merk)
     st.session_state.originele_vraag = vraag_input
-    st.session_state.antwoorden      = {}
+    st.session_state.antwoorden      = dict(st.session_state.persistent_context)
     st.session_state.pending_vraag   = None
     st.session_state.berichten.append({"rol": "user", "tekst": vraag_input})
     with st.chat_message("user"):
@@ -540,6 +602,12 @@ if verwerk_nu and st.session_state.originele_vraag:
                 if actief_ondergrond:             filter_info += f" Ondergrond: {actief_ondergrond}."
                 if "bestaande_laag" in antwoorden:
                     filter_info += f" Bestaande laag: {antwoorden['bestaande_laag']}."
+                if "ondergrond_staat" in antwoorden:
+                    filter_info += f" Ondergrond staat: {antwoorden['ondergrond_staat']}."
+                if "bestaande_verflaag_type" in antwoorden:
+                    filter_info += f" Bestaande verflaag: {antwoorden['bestaande_verflaag_type']}."
+                if "verflaag_conditie" in antwoorden:
+                    filter_info += f" Conditie verflaag: {antwoorden['verflaag_conditie']}."
 
                 # Gespreksgeschiedenis voor Claude
                 gesprek = []
@@ -565,6 +633,20 @@ Zoek in de TDS-context naar:
 3. Wachttijd voordat overheen geschilderd mag worden?
 Geef alleen producten die expliciet geschikt zijn voor deze bestaande laag."""
 
+                # Instructie bij geschilderde ondergrond
+                verflaag_instructie = ""
+                if antwoorden.get("ondergrond_staat", "").startswith("Voorzien"):
+                    vtype = antwoorden.get("bestaande_verflaag_type", "onbekend")
+                    cond  = antwoorden.get("verflaag_conditie", "onbekend")
+                    verflaag_instructie = f"""
+
+GESCHILDERDE ONDERGROND — type: {vtype} | conditie: {cond}
+Zoek in de TDS-context naar:
+1. Voorbereiding: schuren, ontvetten, verwijderen losse verf (afhankelijk van conditie)?
+2. Compatibiliteit: mag deze primer op {vtype}?
+3. Aanbevolen primer voor renovatie op bestaande laag.
+Bij slechte conditie: adviseer verwijdering of gebruik van een hechtprimer."""
+
                 systeem_prompt = f"""Je bent een deskundige technisch assistent voor verfproducten van AkzoNobel Benelux.
 Je helpt medewerkers van de technische supportafdeling om klanten snel en correct te helpen.
 
@@ -573,7 +655,7 @@ STRIKTE REGELS:
 - Als het antwoord NIET in de datasheets staat: zeg "Geen TDS beschikbaar voor dit product."
 - Let op [type: ...]: een [type: eindlaag] is GEEN primer, ook al noemt die TDS een primer.
 - Noem altijd de exacte productnaam en het merk uit de context.
-- Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.{filter_info}{overheen_instructie}
+- Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.{filter_info}{overheen_instructie}{verflaag_instructie}
 
 TDS-CONTEXT (alleen deze bronnen gebruiken):
 {context if context else "Geen relevante datasheets gevonden voor deze zoekcombinatie."}"""
@@ -600,6 +682,11 @@ TDS-CONTEXT (alleen deze bronnen gebruiken):
                             st.caption(f"• {bron}  _(score: {score})_")
 
         st.session_state.berichten.append({"rol": "assistant", "tekst": antwoord})
+        # Sla markt/segment/merk op in persistent_context voor volgende vragen
+        PERSISTENTE_KEYS = {"markt", "segment", "merk"}
+        for k, v in antwoorden.items():
+            if k in PERSISTENTE_KEYS:
+                st.session_state.persistent_context[k] = v
         # Reset antwoorden voor volgende vraag
         st.session_state.antwoorden    = {}
         st.session_state.originele_vraag = None
