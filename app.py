@@ -183,7 +183,20 @@ def filter_eindlagen(docs: list, gevraagd_producttype: str | None) -> list:
 # ── Vervolgvragen bepalen (voor Claude-call) ──────────────────────────────────
 def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
                           markt_filter: str, segment_filter: str, merk_filter: str) -> dict | None:
-    """Geeft de eerstvolgende benodigde vervolgvraag terug, of None als genoeg context."""
+    """
+    Geeft de eerstvolgende benodigde vervolgvraag terug, of None als genoeg context.
+    Volgorde (conform VRAGENFLOW.md):
+      0. bestaande_laag (overheen-vragen)
+      1. ondergrond (ALTIJD als eerste — meest bepalend)
+      2. metaaltype (ferro/non-ferro, alleen bij metaal)
+      3. ondergrond_staat (kaal of geschilderd, hout/metaal)
+      4. bestaande_verflaag_type (als geschilderd)
+      5. verflaag_conditie (als geschilderd)
+      6. locatie (binnen/buiten)
+      7. markt
+      8. segment
+      9. merk
+    """
     alles = vraag + " " + " ".join(antwoorden.values())
     producttype = detecteer_producttype(alles)
     ondergrond  = detecteer_ondergrond(alles)
@@ -210,44 +223,26 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
             ]
         }
 
-    # 1. Markt / land — als sidebar op "Beide" staat en niet duidelijk uit vraag
-    if markt_filter == "Beide" and not markt and "markt" not in antwoorden:
-        return {
-            "key": "markt",
-            "vraag": "Voor welke markt / welk land?",
-            "opties": ["🇳🇱 Nederland (NL)", "🇧🇪 België (BE)", "Beide landen"]
-        }
-
-    # 2. Segment — als sidebar op "Beide" staat
-    if segment_filter == "Beide" and not segment and "segment" not in antwoorden:
-        return {
-            "key": "segment",
-            "vraag": "Voor professioneel gebruik of particulier?",
-            "opties": ["🔧 Professioneel / schilder (PROF)", "🏠 Particulier / DIY", "Beide"]
-        }
-
-    # 3. Primer zonder ondergrond
-    if producttype in ("primer", "grondverf") and not ondergrond:
+    # 1. Ondergrond — ALTIJD als eerste vraag (tenzij al bekend uit vraag of antwoorden)
+    if not ondergrond and "ondergrond" not in antwoorden:
         return {
             "key": "ondergrond",
-            "vraag": "Wat voor ondergrond?",
-            "opties": ["Staal/ijzer (ferro) 🔩", "Aluminium/zink (non-ferro) ✨",
-                       "Hout 🪵", "Beton/steen 🧱", "Gips/muur 🏠", "Kunststof 🔵"]
+            "vraag": "Wat is de ondergrond?",
+            "opties": ["Metaal 🔩", "Hout 🪵", "Beton / steen 🧱", "Muur / gips 🏠", "Kunststof 🔵"]
         }
 
-    # 4. Metaalprimer: ferro of non-ferro?
-    if producttype in ("primer", "grondverf") and ondergrond == "metaal" and not metaaltype:
+    # 2. Metaaltype: ferro of non-ferro?
+    if ondergrond == "metaal" and not metaaltype and "metaaltype" not in antwoorden:
         return {
             "key": "metaaltype",
-            "vraag": "Ferro of non-ferro metaal?",
-            "opties": ["Staal/ijzer (ferro) 🔩", "Aluminium/zink (non-ferro) ✨", "Beide / weet ik niet"]
+            "vraag": "Wat voor metaal?",
+            "opties": ["Staal / ijzer (ferro) 🔩", "Aluminium / zink (non-ferro) ✨",
+                       "Gegalvaniseerd staal", "Beide / weet ik niet"]
         }
 
-    # 4b. Kaal of voorzien van verflaag? (hout of metaal, niet bij overheen-vragen)
-    # Bij overheen-vragen is bestaande_laag al gevraagd
+    # 3. Kaal of voorzien van verflaag? (hout of metaal, niet bij overheen-vragen)
     if (not is_overheen_vraag(vraag)
             and ondergrond in ("hout", "metaal")
-            and producttype in ("primer", "grondverf", None)
             and "ondergrond_staat" not in antwoorden):
         return {
             "key": "ondergrond_staat",
@@ -255,7 +250,7 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
             "opties": ["Kaal / onbehandeld 🆕", "Voorzien van verflaag 🎨", "Weet ik niet"]
         }
 
-    # 4c. Als er een verflaag is: wat voor type?
+    # 4. Als er een verflaag is: wat voor type?
     staat = antwoorden.get("ondergrond_staat", "")
     if staat.startswith("Voorzien") and "bestaande_verflaag_type" not in antwoorden:
         return {
@@ -270,7 +265,7 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
             ]
         }
 
-    # 4d. Conditie van de bestaande verflaag?
+    # 5. Conditie van de bestaande verflaag?
     if staat.startswith("Voorzien") and "verflaag_conditie" not in antwoorden:
         return {
             "key": "verflaag_conditie",
@@ -283,23 +278,32 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
             ]
         }
 
-    # 5. Primer/beits/lak zonder buiten/binnen
-    if producttype in ("primer", "eindlaag", "beits", "lak") and not locatie:
+    # 6. Locatie: binnen of buiten?
+    # Muur/gips is bijna altijd binnen — niet vragen
+    if ondergrond not in ("gips", "muur") and not locatie and "locatie" not in antwoorden:
         return {
             "key": "locatie",
             "vraag": "Binnen of buiten?",
             "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]
         }
 
-    # 6. Hout zonder locatie
-    if ondergrond == "hout" and not locatie:
+    # 7. Markt / land
+    if markt_filter == "Beide" and not markt and "markt" not in antwoorden:
         return {
-            "key": "locatie",
-            "vraag": "Binnen of buiten?",
-            "opties": ["Buiten 🌤️", "Binnen 🏠", "Beide"]
+            "key": "markt",
+            "vraag": "Voor welke markt / welk land?",
+            "opties": ["🇳🇱 Nederland (NL)", "🇧🇪 België (BE)", "Beide landen"]
         }
 
-    # 7. Merkvoorkeur — gefilterd op actieve markt/segment
+    # 8. Segment
+    if segment_filter == "Beide" and not segment and "segment" not in antwoorden:
+        return {
+            "key": "segment",
+            "vraag": "Voor professioneel gebruik of particulier?",
+            "opties": ["🔧 Professioneel / schilder (PROF)", "🏠 Particulier / DIY", "Beide"]
+        }
+
+    # 9. Merkvoorkeur — gefilterd op actieve markt/segment
     if merk_filter == "Alle merken" and not merk and "merk" not in antwoorden:
         beschikbare_merken = merken_voor_context(markt_filter, segment_filter, antwoorden)
         return {
@@ -672,7 +676,8 @@ STRIKTE REGELS:
 - Als het antwoord NIET in de datasheets staat: zeg "Geen TDS beschikbaar voor dit product."
 - Let op [type: ...]: een [type: eindlaag] is GEEN primer, ook al noemt die TDS een primer.
 - Noem altijd de exacte productnaam en het merk uit de context.
-- Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.{filter_info}{overheen_instructie}{verflaag_instructie}
+- Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.
+- STEL NOOIT ZELF VRAGEN aan de gebruiker. De interface regelt alle verduidelijkingsvragen via knoppen. Als er informatie ontbreekt, geef dan het best mogelijke antwoord op basis van wat je hebt en vermeld kort welke info voor een completer advies handig zou zijn — maar stel geen vragen in vraagvorm.{filter_info}{overheen_instructie}{verflaag_instructie}
 
 TDS-CONTEXT (alleen deze bronnen gebruiken):
 {context if context else "Geen relevante datasheets gevonden voor deze zoekcombinatie."}"""
