@@ -58,6 +58,15 @@ def detecteer_locatie(tekst: str) -> str | None:
         return "binnen"
     return None
 
+def is_overheen_vraag(tekst: str) -> bool:
+    """Detecteer renovatie/overheen-schilderen vragen."""
+    t = tekst.lower()
+    return any(w in t for w in [
+        "overheen", "over heen", "oververf", "over de bestaande",
+        "op de oude", "op bestaande", "renovatie", "overlagen",
+        "overcoat", "op het huidige", "op mijn huidige", "hier overheen"
+    ])
+
 def detecteer_metaaltype(tekst: str) -> str | None:
     t = tekst.lower()
     if any(w in t for w in ["staal", "ijzer", "ferro"]) and "non-ferro" not in t:
@@ -183,6 +192,23 @@ def bepaal_vervolgvragen(vraag: str, antwoorden: dict,
     markt       = detecteer_markt(alles)
     segment     = detecteer_segment(alles)
     merk        = detecteer_merk(alles)
+
+    # 0. Overheen schilderen: wat is de bestaande laag?
+    if is_overheen_vraag(vraag) and "bestaande_laag" not in antwoorden:
+        return {
+            "key": "bestaande_laag",
+            "vraag": "Wat is de bestaande laag waarover geschilderd wordt?",
+            "opties": [
+                "Bestaande muurverf (watergedragen)",
+                "Bestaande alkyd/olieverf",
+                "Bestaande lak of vernis",
+                "Bestaande grondverf/primer",
+                "Onbehandeld hout",
+                "Onbehandeld metaal",
+                "Beton of steen",
+                "Weet ik niet"
+            ]
+        }
 
     # 1. Markt / land — als sidebar op "Beide" staat en niet duidelijk uit vraag
     if markt_filter == "Beide" and not markt and "markt" not in antwoorden:
@@ -512,6 +538,8 @@ if verwerk_nu and st.session_state.originele_vraag:
                 if merk_filter != "Alle merken":  filter_info += f" Merk: {merk_filter}."
                 if actief_producttype:            filter_info += f" Producttype: {actief_producttype}."
                 if actief_ondergrond:             filter_info += f" Ondergrond: {actief_ondergrond}."
+                if "bestaande_laag" in antwoorden:
+                    filter_info += f" Bestaande laag: {antwoorden['bestaande_laag']}."
 
                 # Gespreksgeschiedenis voor Claude
                 gesprek = []
@@ -524,6 +552,19 @@ if verwerk_nu and st.session_state.originele_vraag:
                 else:
                     gesprek.append({"role": "user", "content": verrijkte_vraag})
 
+                # Extra instructie bij overheen-schilderen vragen
+                overheen_instructie = ""
+                if is_overheen_vraag(originele or verrijkte_vraag):
+                    bestaande = antwoorden.get("bestaande_laag", "onbekend")
+                    overheen_instructie = f"""
+
+RENOVATIEVRAAG — bestaande laag: {bestaande}
+Zoek in de TDS-context naar:
+1. Sectie 'Overlaagbaarheid' of 'Verf systeem' — welke producten mogen overheen?
+2. Vereiste voorbehandeling (schuren, ontvetten, primer)?
+3. Wachttijd voordat overheen geschilderd mag worden?
+Geef alleen producten die expliciet geschikt zijn voor deze bestaande laag."""
+
                 systeem_prompt = f"""Je bent een deskundige technisch assistent voor verfproducten van AkzoNobel Benelux.
 Je helpt medewerkers van de technische supportafdeling om klanten snel en correct te helpen.
 
@@ -532,7 +573,7 @@ STRIKTE REGELS:
 - Als het antwoord NIET in de datasheets staat: zeg "Geen TDS beschikbaar voor dit product."
 - Let op [type: ...]: een [type: eindlaag] is GEEN primer, ook al noemt die TDS een primer.
 - Noem altijd de exacte productnaam en het merk uit de context.
-- Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.{filter_info}
+- Antwoord in het Nederlands. Bondig en praktisch — medewerker heeft klant aan de lijn.{filter_info}{overheen_instructie}
 
 TDS-CONTEXT (alleen deze bronnen gebruiken):
 {context if context else "Geen relevante datasheets gevonden voor deze zoekcombinatie."}"""
